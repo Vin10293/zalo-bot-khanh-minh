@@ -49,9 +49,9 @@ app.post('/webhook', async (req, res) => {
       const userText = body?.message?.text;
 
       if (senderId && userText) {
-        // 1. Gọi Gemini 2.5 Flash để sinh câu trả lời
+        // 1. Gọi Gemini 3.8 Flash để sinh câu trả lời
         const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
+          model: 'gemini-3.8-flash',
           contents: userText,
         });
 
