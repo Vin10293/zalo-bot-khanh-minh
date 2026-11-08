@@ -434,11 +434,24 @@ async function getTaskData(force = false) {
   return taskCache;
 }
 
+// Làm sạch định dạng Markdown (***, **, ###, *) thành văn bản Zalo gọn đẹp, dễ đọc
+function cleanZaloText(raw) {
+  return String(raw || '')
+    .replace(/^#{1,6}\s*(.+)$/gm, (_, title) => `🔷 ${title.replace(/\*/g, '').trim().toUpperCase()}`)
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
+    .replace(/^\s*\*\s+/gm, '• ')
+    .replace(/^\s*-\s+/gm, '• ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 // Hàm gửi tin nhắn qua Zalo Bot API
 async function sendZaloBotMessage(chatId, text) {
   const botToken = ZALO_BOT_TOKEN || ZALO_ACCESS_TOKEN;
   if (!chatId || !text || !botToken) return null;
-  const safeText = text.length > 1900 ? text.slice(0, 1900) + '...' : text;
+  const cleaned = cleanZaloText(text);
+  const safeText = cleaned.length > 1900 ? cleaned.slice(0, 1900) + '...' : cleaned;
   const res = await axios.post(
     `https://bot-api.zaloplatforms.com/bot${botToken}/sendMessage`,
     {
@@ -478,14 +491,18 @@ async function generateReply(userText) {
             `Bạn là trợ lý ảo kế toán & điều hành thi công của Công ty TNHH TVXD Điện Khánh Minh (Bot Tra cứu hồ sơ). ` +
             `HÔM NAY LÀ NGÀY ${todayVN} (theo giờ Việt Nam GMT+7). ` +
             `Luôn dùng đúng số ngày quá hạn / còn hạn đã được hệ thống tính sẵn trong dữ liệu, KHÔNG tự suy đoán ngày hiện tại, KHÔNG hiển thị mã ID nội bộ. ` +
-            `Trả lời bằng tiếng Việt ngắn gọn, rõ ràng, định dạng số tiền dễ đọc (VD: 1.250.000.000 đ) và tuyệt đối dưới 1500 ký tự.` +
+            `QUY TẮC TRÌNH BÀY TRÊN ZALO (RẤT QUAN TRỌNG): ` +
+            `1. Zalo KHÔNG hỗ trợ Markdown nên TUYỆT ĐỐI KHÔNG dùng dấu sao (** hoặc *) và KHÔNG dùng dấu thăng (###). ` +
+            `2. Đầu mục lớn dùng chữ IN HOA kèm icon (VD: 🔷 1. CÔNG TRÌNH: DI DỜI NÚT GIAO ĐỐNG ĐA). ` +
+            `3. Các dòng thông tin chính dùng dấu chấm tròn "• " ở đầu dòng. Các dòng con lùi vào dùng dấu "  ‣ " hoặc "  - ". ` +
+            `4. Trình bày thoáng, phân tách các mục bằng dòng trống, số tiền ghi rõ ràng (VD: 1.795.540.000 đ) và tổng độ dài dưới 1500 ký tự.` +
             dataContext,
           maxOutputTokens: 650,
           thinkingConfig: { thinkingBudget: 0 },
         },
       });
 
-      const text = (response.text || '').trim();
+      const text = cleanZaloText(response.text || '');
       if (text) {
         return text.length > 1900 ? text.slice(0, 1900) + '...' : text;
       }
