@@ -84,18 +84,156 @@ function parseDong(dongStr) {
   }
 }
 
-// 1. Tóm tắt dữ liệu Webapp Kế toán & Hợp đồng Công trình
-function buildKmContext(D) {
+// 1. Tóm tắt dữ liệu Webapp Kế toán & Hợp đồng Công trình (tự động gộp bổ sung các công trình từ App Điều hành nếu chưa có bên Kế toán)
+function buildKmContext(D, taskRaw) {
   if (!D || !Array.isArray(D.HopDong)) return '';
 
   const todayStr = getTodayVN();
-  const HopDong = D.HopDong || [];
-  const PhuLuc = D.PhuLuc || [];
+  const HopDong = [...(D.HopDong || [])];
+  const PhuLuc = [...(D.PhuLuc || [])];
   const Loc = D.Loc || [];
   const VT = D.VT || [];
-  const TT = D.TT || [];
+  const TT = [...(D.TT || [])];
   const NCC = D.NCC || [];
   const TTNCC = D.TTNCC || [];
+
+  // Tự động gộp các công trình từ App Điều hành công việc (nếu người dùng chưa kịp chạy hàm đồng bộ sang Sheet Kế toán)
+  if (taskRaw && Array.isArray(taskRaw.projects)) {
+    const nrm = (s) => String(s || '').trim().toLowerCase();
+    const tasks = taskRaw.tasks || [];
+    taskRaw.projects.forEach((p, idx) => {
+      const pName = String(p.name || '').trim();
+      if (!pName) return;
+      let ex = null;
+      if (p.hd) {
+        ex = HopDong.find(
+          (h) => nrm(h.so) === nrm(p.hd) && !(p.hd === '07/2026/HĐ-XD' && !nrm(pName).includes('suối cả'))
+        );
+      }
+      if (!ex) {
+        ex = HopDong.find(
+          (h) => nrm(h.ten) === nrm(pName) || nrm(h.ten).includes(nrm(pName)) || nrm(pName).includes(nrm(h.ten))
+        );
+      }
+      const cid = ex ? String(ex.id) : 'tk_' + idx;
+      let blj = {},
+        nt = {},
+        pls = [],
+        dots = [];
+      try {
+        blj = p.blj ? JSON.parse(p.blj) : {};
+      } catch (e) {}
+      try {
+        nt = p.nt ? JSON.parse(p.nt) : {};
+      } catch (e) {}
+      try {
+        pls = p.pls ? JSON.parse(p.pls) : [];
+      } catch (e) {}
+      try {
+        dots = p.dot ? JSON.parse(p.dot) : [];
+      } catch (e) {}
+
+      if (!ex) {
+        const th = blj.th || {};
+        const tu = blj.tu || {};
+        const bh = blj.bh || {};
+        const blthOk = th.s === 'co' || th.co === true || String(p.bl || '').includes('TH');
+        const bltuOk = tu.s === 'co' || tu.co === true || String(p.bl || '').includes('TU');
+        const blbhOk = bh.s === 'co' || bh.co === true;
+        let pt = String(p.pt || '').trim();
+        if (!pt) {
+          const tWho = tasks.find((t) => nrm(t.project) === nrm(pName) && t.who);
+          if (tWho) pt = tWho.who;
+        }
+        const ownerStr = String(p.owner || '').trim();
+        const isGov = !ownerStr || /ban|ubnd|sở|xã|huyện|tỉnh|ttpt|quỹ đất|quy nhơn/i.test(ownerStr);
+
+        HopDong.push({
+          id: cid,
+          ten: pName,
+          cdt: ownerStr,
+          so: String(p.hd || '').trim(),
+          ky: String(p.ky || '').trim(),
+          kc: String(p.bd || '').trim(),
+          kt: String(p.kt || '').trim(),
+          gt: N(p.gt),
+          pt: pt,
+          tu: N(p.tu),
+          blth: blthOk,
+          blthh: blthOk ? th.han || (th.den === 'bg' ? 'Đến khi bàn giao đưa vào sử dụng' : '') : '',
+          bltu: bltuOk,
+          bltuh: bltuOk ? tu.han || 'Đến khi thu hồi toàn bộ tạm ứng' : '',
+          gc: String(p.ghi || '').trim(),
+          ld: '',
+          tk: '',
+          bhp: 0,
+          qtp: 0,
+          xong: p.xong === '1' || p.xong === 1 || p.xong === true || p.xong === 'TRUE',
+          blbh: blbhOk,
+          blbhh: blbhOk ? bh.han || '' : '',
+          lcdt: isGov ? 'Cơ quan Nhà nước' : 'Khác (không phải cơ quan Nhà nước)',
+          bbsd: !!nt.co,
+          bbsdn: nt.ngay || '',
+          kbh: !!nt.kbh,
+          kbhn: nt.kbhn || '',
+        });
+      }
+
+      if (Array.isArray(pls) && pls.length) {
+        const curPls = PhuLuc.filter((x) => String(x.ct) === cid);
+        pls.forEach((r, pIdx) => {
+          const so = String(r.so || '').trim();
+          const ngay = String(r.ngay || '').trim();
+          if (curPls.some((x) => nrm(x.so) === nrm(so) && String(x.ngay) === ngay)) return;
+          const ghVal = r.gh === true ? r.ghn || '' : typeof r.gh === 'string' ? r.gh : '';
+          const gtVal = N(r.gt);
+          const khlVal = String(r.khl || r.nd || '').trim();
+          PhuLuc.push({
+            id: cid + '_pl_' + pIdx,
+            ct: cid,
+            so: so,
+            ngay: ngay,
+            gt: gtVal,
+            gh: !!(r.gh === true || ghVal),
+            ghn: ghVal,
+            dc: !!(r.dc === true || gtVal !== 0),
+            kh: !!(r.kh === true || khlVal),
+            khl: khlVal,
+          });
+        });
+      }
+
+      if (Array.isArray(dots) && dots.length) {
+        const curTts = TT.filter((x) => String(x.ct) === cid && (N(x.st) >= 2 || x.hd));
+        if (!curTts.length) {
+          dots.forEach((r, dIdx) => {
+            const tien = N(r.tien !== undefined ? r.tien : r.st);
+            if (!tien && !r.hdso) return;
+            const vat = 10;
+            const preVat = Math.round(tien / (1 + vat / 100));
+            const st = r.tts !== undefined ? N(r.tts) : 3;
+            const ngay = String(r.hdngay || r.ngay || '').trim();
+            TT.push({
+              id: cid + '_tt_' + dIdx,
+              ct: cid,
+              dot: dIdx + 1,
+              ngay: ngay,
+              st: st,
+              dong: JSON.stringify([{ sl: 1, dg: preVat }]),
+              hd: String(r.hdso || '').trim(),
+              vat: vat,
+              gbh: 0,
+              gqt: 0,
+              tru: 0,
+              ctv: st === 3 ? tien : 0,
+              tkb: 0,
+              nd: String(r.ghi || r.loai || 'Thanh toán đợt ' + (dIdx + 1)).trim(),
+            });
+          });
+        }
+      }
+    });
+  }
 
   const by = (arr, cid) => arr.filter((x) => String(x.ct) === String(cid));
   const gtT = (c) => N(c.gt) + sm(by(PhuLuc, c.id), (p) => N(p.gt));
@@ -467,12 +605,14 @@ async function sendZaloBotMessage(chatId, text) {
 
 // Hàm gọi Gemini siêu tốc kèm dữ liệu thực tế từ cả 2 Webapp Khánh Minh
 async function generateReply(userText) {
-  const forceRefresh = /cập nhật|tải lại|mới nhất|refresh|sync/i.test(userText);
+  const forceRefresh = /cập nhật|tải lại|mới nhất|refresh|sync|đồng bộ/i.test(userText);
   const [km, tk] = await Promise.all([getKmData(forceRefresh), getTaskData(forceRefresh)]);
   const todayVN = fd(getTodayVN());
 
   let dataContext = '';
-  if (km.summaryText) {
+  if (km.rawData) {
+    dataContext += `\n\n${buildKmContext(km.rawData, tk.rawData)}`;
+  } else if (km.summaryText) {
     dataContext += `\n\n${km.summaryText}`;
   }
   if (tk.summaryText) {
