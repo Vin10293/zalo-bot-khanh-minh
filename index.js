@@ -57,6 +57,9 @@ app.post('/webhook', async (req, res) => {
         const response = await ai.models.generateContent({
           model: 'gemini-3.8-flash',
           contents: userText,
+          config: {
+            thinkingConfig: { thinkingBudget: 0 },
+          },
         });
 
         const replyText = response.text || 'Xin lỗi, tôi chưa thể xử lý tin nhắn này.';
