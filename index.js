@@ -603,11 +603,42 @@ async function sendZaloBotMessage(chatId, text) {
   return res.data;
 }
 
-// Hàm gọi Gemini siêu tốc kèm dữ liệu thực tế từ cả 2 Webapp Khánh Minh
+// Hàm gọi POST tới Google Apps Script Webapp (tự động xử lý redirect 302 của Apps Script)
+async function postToAppsScript(webappUrl, payload) {
+  const res = await axios.post(webappUrl, JSON.stringify(payload), {
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    maxRedirects: 5,
+    timeout: 12000,
+  });
+  return res.data;
+}
+
+// Thực thi các lệnh cập nhật dữ liệu từ AI sang Webapp Điều hành thi công hoặc Webapp Kế toán
+async function executeWebappWriteActions(actions) {
+  const results = [];
+  for (const act of actions) {
+    try {
+      const targetUrl = act.target === 'task_app' ? KM_TASK_WEBAPP_URL : KM_WEBAPP_URL;
+      const r = await postToAppsScript(targetUrl, act);
+      results.push({ action: act.action, target: act.target, result: r });
+    } catch (e) {
+      results.push({ action: act.action, target: act.target, error: e.message });
+    }
+  }
+  // Xóa cache để lần hỏi kế tiếp lấy ngay dữ liệu vừa ghi
+  kmCache.updatedAt = 0;
+  taskCache.updatedAt = 0;
+  return results;
+}
+
+// Hàm gọi Gemini siêu tốc kèm dữ liệu thực tế và khả năng GHI/CẬP NHẬT trực tiếp vào cả 2 Webapp Khánh Minh
 async function generateReply(userText) {
-  const forceRefresh = /cập nhật|tải lại|mới nhất|refresh|sync|đồng bộ/i.test(userText);
+  const forceRefresh = /cập nhật|tải lại|mới nhất|refresh|sync|đồng bộ|giao việc|hoàn thành|thanh toán| xuất hđ|phụ lục|ghi chú/i.test(
+    userText
+  );
   const [km, tk] = await Promise.all([getKmData(forceRefresh), getTaskData(forceRefresh)]);
-  const todayVN = fd(getTodayVN());
+  const todayISO = getTodayVN();
+  const todayVN = fd(todayISO);
 
   let dataContext = '';
   if (km.rawData) {
@@ -618,6 +649,29 @@ async function generateReply(userText) {
   if (tk.summaryText) {
     dataContext += `\n\n${tk.summaryText}`;
   }
+
+  const writeGuide = `
+KHẢ NĂNG CẬP NHẬT DỮ LIỆU TRỰC TIẾP LÊN WEBAPP (RẤT QUAN TRỌNG):
+Bạn CÓ TOÀN QUYỀN cập nhật dữ liệu vào cả 2 Webapp khi Kỹ thuật, Kế toán hoặc Quản lý nhắn báo cáo tiến độ, giao việc, cập nhật hợp đồng, hóa đơn, phụ lục hoặc thanh toán NCC.
+Khi người dùng yêu cầu cập nhật / thêm mới / báo cáo số liệu, hãy:
+1. Viết lời xác nhận rõ ràng, lịch sự cho người dùng (theo đúng chuẩn trình bày Zalo không dùng dấu sao).
+2. Ở CUỐI CÙNG của câu trả lời, đính kèm khối lệnh JSON nằm trong cặp thẻ <ACTION_JSON>...</ACTION_JSON> (người dùng sẽ không nhìn thấy thẻ này, hệ thống sẽ tự động bóc ra để ghi vào Google Sheet).
+Cấu trúc mảng JSON bên trong <ACTION_JSON>:
+- Cập nhật công việc thi công (Kỹ thuật báo cáo tiến độ):
+  [{"target":"task_app","action":"update_task","project":"Tên công trình","name":"Tên công việc","done":25,"pct":60,"st":"Đang thực hiện","fc":"Đúng tiến độ","note":"Ghi chú nếu có"}]
+- Giao công việc mới (Quản lý phân việc):
+  [{"target":"task_app","action":"create_task","project":"Tên công trình","name":"Tên công việc","type":"Đường dây 22kV","who":"Họ tên người nhận","start":"${todayISO}","end":"YYYY-MM-DD","pri":"Cao","qty":0,"unit":"bộ","note":""}]
+- Cập nhật thông tin Hợp đồng công trình (Kế toán sửa ghi chú, tạm ứng, người phụ trách, trạng thái xong, bảo lãnh, biên bản):
+  [{"target":"km_app","action":"update_project","project":"Tên công trình","gc":"Ghi chú mới","tu":0,"pt":"Người phụ trách","xong":false,"blth":true,"bbsd":true,"bbsdn":"YYYY-MM-DD"}]
+- Thêm / cập nhật Hóa đơn hoặc Đợt thanh toán của công trình (st=2 là Đã xuất HĐ chờ thu, st=3 là CĐT đã thanh toán):
+  [{"target":"km_app","action":"upsert_invoice","project":"Tên công trình","dot":1,"hd":"Số HĐ","ngay":"${todayISO}","gv":850000000,"vat":10,"st":3,"ctv":850000000,"gbh":0,"gqt":0,"tru":0,"nd":"Nội dung"}]
+- Thêm Phụ lục hợp đồng (gia hạn hoặc điều chỉnh tăng/giảm giá trị):
+  [{"target":"km_app","action":"add_appendix","project":"Tên công trình","so":"Số PL","ngay":"${todayISO}","ghn":"YYYY-MM-DD","gt":0,"khl":"Nội dung"}]
+- Ghi nhận thanh toán cho Nhà cung cấp (NCC):
+  [{"target":"km_app","action":"pay_supplier","ncc":"Tên NCC","sotien":150000000,"ngay":"${todayISO}","gc":"Ghi chú"}]
+- Đồng bộ toàn bộ công trình từ App Điều hành sang App Kế toán:
+  [{"target":"km_app","action":"sync_from_task_app"}]
+Chỉ xuất thẻ <ACTION_JSON>[...]</ACTION_JSON> khi người dùng thực sự yêu cầu ghi/cập nhật/báo cáo dữ liệu mới. Nếu chỉ hỏi tra cứu thông tin thì KHÔNG xuất thẻ này.`;
 
   const models = ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-3.8-flash'];
 
@@ -636,13 +690,39 @@ async function generateReply(userText) {
             `2. Đầu mục lớn dùng chữ IN HOA kèm icon (VD: 🔷 1. CÔNG TRÌNH: DI DỜI NÚT GIAO ĐỐNG ĐA). ` +
             `3. Các dòng thông tin chính dùng dấu chấm tròn "• " ở đầu dòng. Các dòng con lùi vào dùng dấu "  ‣ " hoặc "  - ". ` +
             `4. Trình bày thoáng, phân tách các mục bằng dòng trống, số tiền ghi rõ ràng (VD: 1.795.540.000 đ) và tổng độ dài dưới 1500 ký tự.` +
+            writeGuide +
             dataContext,
-          maxOutputTokens: 650,
+          maxOutputTokens: 750,
           thinkingConfig: { thinkingBudget: 0 },
         },
       });
 
-      const text = cleanZaloText(response.text || '');
+      let rawReply = response.text || '';
+      const actionMatch = rawReply.match(/<ACTION_JSON>\s*([\s\S]*?)\s*<\/ACTION_JSON>/i);
+
+      if (actionMatch) {
+        rawReply = rawReply.replace(/<ACTION_JSON>[\s\S]*?<\/ACTION_JSON>/gi, '').trim();
+        try {
+          const parsedActions = JSON.parse(actionMatch[1]);
+          const actionsArr = Array.isArray(parsedActions) ? parsedActions : [parsedActions];
+          const execRes = await executeWebappWriteActions(actionsArr);
+          const hasFailure = execRes.some(
+            (r) =>
+              r.error ||
+              (r.result && r.result.ok === false) ||
+              (typeof r.result === 'string' && r.result.includes('<!DOCTYPE html>'))
+          );
+          if (hasFailure) {
+            const firstErr = execRes.find((r) => r.error || (r.result && r.result.ok === false));
+            const errDetail = firstErr?.error || firstErr?.result?.error || 'Chưa cập nhật bản Triển khai mới (doPost) trên Apps Script';
+            rawReply += `\n\n⚠️ Lưu ý từ máy chủ Google Sheet: ${errDetail}`;
+          }
+        } catch (parseErr) {
+          console.warn('Action JSON parse error:', parseErr.message);
+        }
+      }
+
+      const text = cleanZaloText(rawReply);
       if (text) {
         return text.length > 1900 ? text.slice(0, 1900) + '...' : text;
       }
