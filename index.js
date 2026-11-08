@@ -355,8 +355,17 @@ app.post('/webhook', async (req, res) => {
     // TRƯỜNG HỢP 1: Sự kiện từ Zalo Bot Platform (Miễn phí 100% - bot-api.zaloplatforms.com)
     if (eventName === 'message.text.received' || (ZALO_BOT_TOKEN && botEvent?.message?.text && !eventName)) {
       const chatId = botEvent?.message?.chat?.id || botEvent?.sender?.id;
-      const userText = botEvent?.message?.text;
+      const chatType = botEvent?.message?.chat?.chat_type;
+      let userText = (botEvent?.message?.text || '').trim();
       const botToken = ZALO_BOT_TOKEN || ZALO_ACCESS_TOKEN;
+
+      // Xử lý khi chat trong Nhóm: tự động cắt bỏ phần "@Bot Tra cứu hồ sơ" ở đầu câu hỏi để AI hiểu đúng nội dung
+      if (chatType === 'GROUP' || userText.startsWith('@')) {
+        userText = userText
+          .replace(/^@?(Bot\s*Tra\s*cứu\s*hồ\s*sơ|bot\.GsTAbuco|bot)\b[,:\s-]*/i, '')
+          .replace(/^@\S+\s*/, '')
+          .trim();
+      }
 
       if (chatId && userText && botToken) {
         const replyText = await generateReply(userText);
