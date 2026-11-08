@@ -11,9 +11,20 @@ const ZALO_ACCESS_TOKEN = process.env.ZALO_ACCESS_TOKEN;
 const ZALO_BOT_TOKEN = process.env.ZALO_BOT_TOKEN;
 const AI_API_KEY = process.env.AI_API_KEY;
 const ZALO_VERIFY_TOKEN = process.env.ZALO_VERIFY_TOKEN || 'VyEpT9xC0sjqlf1VgAqeO76_Y5gToLC1Dp0m';
+
+// Link 1: Webapp Kế toán & Theo dõi Hợp đồng Công trình
 const KM_WEBAPP_URL =
   process.env.KM_WEBAPP_URL ||
   'https://script.google.com/macros/s/AKfycbzotDKnX34WQz7AW4j5K5ZDiNOhTLdujl5mO94QY7dk-a3cu92ahK9Y0ZkVh7SW-oTF1g/exec';
+
+// Link 2: Webapp Điều hành Thi công & Phân công Công việc
+const KM_TASK_WEBAPP_URL =
+  process.env.KM_TASK_WEBAPP_URL ||
+  'https://script.google.com/macros/s/AKfycbz1zsJXakrcy8cPyv8RzuaTtLsJDKmZ9H6L4HoI4kzg9L7F6bCvrltRDZWSfKdqO8_E/exec';
+
+// Mã nhóm Zalo mặc định để nhận thông báo tự động khi giao việc (tự động lưu khi nhóm có tương tác với bot hoặc truyền qua biến môi trường)
+let defaultGroupChatId = process.env.ZALO_GROUP_CHAT_ID || '';
+let lastActiveChatId = '';
 
 // Khởi tạo Google GenAI client với AI_API_KEY
 const ai = new GoogleGenAI({ apiKey: AI_API_KEY });
@@ -21,8 +32,15 @@ const ai = new GoogleGenAI({ apiKey: AI_API_KEY });
 // Bộ nhớ tạm chống xử lý trùng lặp khi Zalo retry
 const processedMessages = new Set();
 
-// ==================== BỘ ĐỆM & LOGIC NGHIỆP VỤ KẾ TOÁN KHÁNH MINH ====================
+// ==================== BỘ ĐỆM & LOGIC NGHIỆP VỤ KẾ TOÁN + ĐIỀU HÀNH THI CÔNG KHÁNH MINH ====================
 let kmCache = {
+  summaryText: '',
+  rawData: null,
+  updatedAt: 0,
+  status: 'uninitialized',
+};
+
+let taskCache = {
   summaryText: '',
   rawData: null,
   updatedAt: 0,
@@ -66,7 +84,7 @@ function parseDong(dongStr) {
   }
 }
 
-// Tính toán và định dạng toàn bộ dữ liệu Webapp Khánh Minh thành bản tóm tắt siêu chuẩn cho AI
+// 1. Tóm tắt dữ liệu Webapp Kế toán & Hợp đồng Công trình
 function buildKmContext(D) {
   if (!D || !Array.isArray(D.HopDong)) return '';
 
@@ -110,7 +128,6 @@ function buildKmContext(D) {
     return g.length ? g[g.length - 1].ghn : c.kt;
   };
 
-  // Tổng hợp số lượng vật tư đã về theo dòng lọc
   const GOT = {};
   VT.forEach((v) => {
     if (v.loc) GOT[v.loc] = (GOT[v.loc] || 0) + N(v.sl);
@@ -183,7 +200,6 @@ function buildKmContext(D) {
           .join(' | ')
       : 'Chưa xuất HĐ';
 
-    // Kiểm tra bảo lãnh quá hạn / sắp hết hạn
     const checkBl = (ok, h) => {
       if (!ok) return 'Chưa làm';
       const dl = diffDays(h, todayStr);
@@ -214,7 +230,6 @@ function buildKmContext(D) {
       .join('\n');
   });
 
-  // Tổng hợp Công nợ Nhà cung cấp (NCC)
   let totalNccBuy = 0;
   let totalNccPaid = 0;
   let totalNccDebt = 0;
@@ -248,9 +263,9 @@ function buildKmContext(D) {
   });
 
   return [
-    `=== DỮ LIỆU TRỰC TIẾP TỪ WEBAPP THEO DÕI CÔNG TRÌNH ĐIỆN KHÁNH MINH ===`,
+    `=== [NGUỒN 1] WEBAPP KẾ TOÁN & THEO DÕI HỢP ĐỒNG CÔNG TRÌNH ===`,
     `NGÀY HÔM NAY (THEO GIỜ VIỆT NAM GMT+7): ${fd(todayStr)} (YYYY-MM-DD: ${todayStr})`,
-    `⚠️ QUY TẮC BẮT BUỘC VỀ NGÀY THÁNG: Hôm nay là ngày ${fd(todayStr)}. Tuyệt đối KHÔNG tự bịa ngày khác, KHÔNG tự nhẩm sai số ngày còn lại/quá hạn mà PHẢI DÙNG ĐÚNG con số "ĐÃ QUÁ HẠN X NGÀY" hoặc "Còn hạn X ngày" đã được máy tính sẵn ở từng công trình bên dưới!`,
+    `⚠️ QUY TẮC BẮT BUỘC VỀ NGÀY THÁNG: Hôm nay là ngày ${fd(todayStr)}. Tuyệt đối KHÔNG tự bịa ngày khác, KHÔNG tự nhẩm sai số ngày còn lại/quá hạn mà PHẢI DÙNG ĐÚNG con số "ĐÃ QUÁ HẠN X NGÀY" hoặc "Còn hạn X ngày" đã được máy tính sẵn ở dưới!`,
     ``,
     `CẢNH BÁO TIẾN ĐỘ / HẠN HỢP ĐỒNG TÍNH ĐẾN HÔM NAY (${fd(todayStr)}):`,
     `- Công trình ĐÃ QUÁ HẠN (${expiredProjects.length}): ${expiredProjects.length ? expiredProjects.join(' | ') : 'Không có'}`,
@@ -272,11 +287,73 @@ function buildKmContext(D) {
   ].join('\n');
 }
 
-// Hàm tải dữ liệu từ Google Apps Script Webapp (có cache 45 giây để bot phản hồi tức thì)
+// 2. Tóm tắt dữ liệu Webapp Điều hành Thi công & Phân công Công việc
+function buildTaskContext(S) {
+  if (!S || (!Array.isArray(S.tasks) && !Array.isArray(S.people))) return '';
+
+  const todayStr = getTodayVN();
+  const tasks = S.tasks || [];
+  const people = S.people || [];
+  const projects = S.projects || [];
+
+  const doneTasks = tasks.filter((t) => t.st === 'Hoàn thành' || N(t.pct) >= 100);
+  const activeTasks = tasks.filter((t) => t.st !== 'Hoàn thành' && N(t.pct) < 100);
+  const lateTasks = activeTasks.filter((t) => {
+    const dl = diffDays(t.end, todayStr);
+    return dl !== null && dl < 0;
+  });
+  const urgTasks = activeTasks.filter((t) => {
+    const dl = diffDays(t.end, todayStr);
+    return dl !== null && dl >= 0 && (dl <= 3 || (t.pri === 'Cao' && dl <= 7));
+  });
+
+  const taskLines = activeTasks.map((t, i) => {
+    const dl = diffDays(t.end, todayStr);
+    const dlTag =
+      dl === null
+        ? ''
+        : dl < 0
+        ? `ĐÃ QUÁ HẠN ${Math.abs(dl)} NGÀY`
+        : dl === 0
+        ? 'HẾT HẠN HÔM NAY'
+        : `Còn ${dl} ngày`;
+    const qtyStr = N(t.qty) > 0 ? ` | Khối lượng: ${N(t.done)}/${N(t.qty)} ${t.unit || ''}` : '';
+    return `${i + 1}. [${t.project || 'Chung'}] ${t.name} (${t.type || '—'}) - Phụ trách: ${
+      t.who || 'Chưa giao'
+    } | Hạn: ${fd(t.start)} -> ${fd(t.end)} (${dlTag}) | Tiến độ: ${N(t.pct)}% (${t.st || '—'}${
+      t.fc && t.fc !== 'Đúng tiến độ' ? ', ' + t.fc : ''
+    })${qtyStr}${t.note ? ' | Ghi chú: ' + t.note : ''}`;
+  });
+
+  const peopleLines = people.map((p, i) => {
+    const myTasks = tasks.filter((t) => t.who === p.name);
+    const myAct = myTasks.filter((t) => t.st !== 'Hoàn thành' && N(t.pct) < 100);
+    const myLate = myAct.filter((t) => {
+      const dl = diffDays(t.end, todayStr);
+      return dl !== null && dl < 0;
+    });
+    return `${i + 1}. ${p.name} (${p.role || '—'} - ${p.lv || 'Nhân viên'}): Đang làm ${myAct.length} việc (${
+      myLate.length
+    } việc quá hạn), Đã xong ${myTasks.length - myAct.length} việc`;
+  });
+
+  return [
+    `=== [NGUỒN 2] WEBAPP ĐIỀU HÀNH THI CÔNG & PHÂN CÔNG CÔNG VIỆC ===`,
+    `- Tổng công việc: ${tasks.length} việc (Đang thực hiện: ${activeTasks.length}, Đã hoàn thành: ${doneTasks.length}, Quá hạn: ${lateTasks.length}, Khẩn cấp: ${urgTasks.length})`,
+    `- Tổng nhân sự trên hệ thống: ${people.length} người | Số dự án điều hành: ${projects.length}`,
+    ``,
+    `DANH SÁCH NHÂN SỰ & KHỐI LƯỢNG VIỆC (${people.length}):`,
+    peopleLines.join('\n') || 'Chưa có nhân sự',
+    ``,
+    `DANH SÁCH CÔNG VIỆC ĐANG THỰC HIỆN / CẦN LƯU Ý (${activeTasks.length}):`,
+    taskLines.join('\n') || 'Hiện không có công việc nào đang mở.',
+  ].join('\n');
+}
+
+// Hàm tải dữ liệu từ Webapp Kế toán
 async function getKmData(force = false) {
   const now = Date.now();
   if (!force && kmCache.rawData && now - kmCache.updatedAt < 45000) {
-    // Luôn dựng lại summaryText theo ngày hôm nay mới nhất
     kmCache.summaryText = buildKmContext(kmCache.rawData);
     return kmCache;
   }
@@ -315,17 +392,78 @@ async function getKmData(force = false) {
   return kmCache;
 }
 
-// Hàm gọi Gemini siêu tốc kèm dữ liệu thực tế từ Webapp Khánh Minh
+// Hàm tải dữ liệu từ Webapp Điều hành công việc
+async function getTaskData(force = false) {
+  const now = Date.now();
+  if (!force && taskCache.rawData && now - taskCache.updatedAt < 45000) {
+    taskCache.summaryText = buildTaskContext(taskCache.rawData);
+    return taskCache;
+  }
+
+  try {
+    const sep = KM_TASK_WEBAPP_URL.includes('?') ? '&' : '?';
+    const url = `${KM_TASK_WEBAPP_URL}${sep}json=1`;
+    const res = await axios.get(url, {
+      timeout: 8000,
+      maxRedirects: 5,
+      headers: { Accept: 'application/json' },
+    });
+
+    const data = res.data;
+    if (data && typeof data === 'object' && (Array.isArray(data.tasks) || Array.isArray(data.people))) {
+      taskCache = {
+        summaryText: buildTaskContext(data),
+        rawData: data,
+        updatedAt: now,
+        status: 'ok',
+      };
+      return taskCache;
+    }
+
+    const str = typeof data === 'string' ? data : JSON.stringify(data);
+    if (str.includes('accounts.google.com') || str.includes('ServiceLogin')) {
+      taskCache.status = 'auth_required';
+    } else if (str.includes('<!DOCTYPE html>') || str.includes('<html')) {
+      taskCache.status = 'html_only';
+    }
+  } catch (err) {
+    console.warn('Fetch Task Webapp error:', err.message);
+    taskCache.status = 'error: ' + err.message;
+  }
+
+  return taskCache;
+}
+
+// Hàm gửi tin nhắn qua Zalo Bot API
+async function sendZaloBotMessage(chatId, text) {
+  const botToken = ZALO_BOT_TOKEN || ZALO_ACCESS_TOKEN;
+  if (!chatId || !text || !botToken) return null;
+  const safeText = text.length > 1900 ? text.slice(0, 1900) + '...' : text;
+  const res = await axios.post(
+    `https://bot-api.zaloplatforms.com/bot${botToken}/sendMessage`,
+    {
+      chat_id: chatId,
+      text: safeText,
+    },
+    {
+      headers: { 'Content-Type': 'application/json' },
+    }
+  );
+  return res.data;
+}
+
+// Hàm gọi Gemini siêu tốc kèm dữ liệu thực tế từ cả 2 Webapp Khánh Minh
 async function generateReply(userText) {
   const forceRefresh = /cập nhật|tải lại|mới nhất|refresh|sync/i.test(userText);
-  const km = await getKmData(forceRefresh);
+  const [km, tk] = await Promise.all([getKmData(forceRefresh), getTaskData(forceRefresh)]);
   const todayVN = fd(getTodayVN());
 
   let dataContext = '';
   if (km.summaryText) {
-    dataContext = `\n\nDưới đây là toàn bộ dữ liệu thực tế mới nhất từ Webapp Theo dõi công trình của Công ty TNHH TVXD Điện Khánh Minh:\n${km.summaryText}`;
-  } else if (km.status === 'auth_required' || km.status === 'html_only') {
-    dataContext = `\n\n[LƯU Ý KỸ THUẬT: Hiện tại link Apps Script Webapp (${KM_WEBAPP_URL}) đang yêu cầu đăng nhập Google hoặc chưa cập nhật hàm doGet(e) trả JSON.]`;
+    dataContext += `\n\n${km.summaryText}`;
+  }
+  if (tk.summaryText) {
+    dataContext += `\n\n${tk.summaryText}`;
   }
 
   const models = ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-3.8-flash'];
@@ -337,9 +475,9 @@ async function generateReply(userText) {
         contents: userText,
         config: {
           systemInstruction:
-            `Bạn là trợ lý ảo kế toán & theo dõi công trình của Công ty TNHH TVXD Điện Khánh Minh (Bot Tra cứu hồ sơ). ` +
+            `Bạn là trợ lý ảo kế toán & điều hành thi công của Công ty TNHH TVXD Điện Khánh Minh (Bot Tra cứu hồ sơ). ` +
             `HÔM NAY LÀ NGÀY ${todayVN} (theo giờ Việt Nam GMT+7). ` +
-            `Luôn dùng đúng số ngày quá hạn / còn hạn đã được hệ thống tính sẵn trong dữ liệu, KHÔNG tự suy đoán ngày hiện tại. ` +
+            `Luôn dùng đúng số ngày quá hạn / còn hạn đã được hệ thống tính sẵn trong dữ liệu, KHÔNG tự suy đoán ngày hiện tại, KHÔNG hiển thị mã ID nội bộ. ` +
             `Trả lời bằng tiếng Việt ngắn gọn, rõ ràng, định dạng số tiền dễ đọc (VD: 1.250.000.000 đ) và tuyệt đối dưới 1500 ký tự.` +
             dataContext,
           maxOutputTokens: 650,
@@ -372,17 +510,78 @@ app.get('/', (req, res) => {
 </html>`);
 });
 
-// Endpoint kiểm tra kết nối dữ liệu Webapp Khánh Minh
+// Endpoint kiểm tra kết nối dữ liệu cả 2 Webapp Khánh Minh + Group Chat ID
 app.get('/km-status', async (req, res) => {
-  const km = await getKmData(true);
+  const [km, tk] = await Promise.all([getKmData(true), getTaskData(true)]);
   res.status(200).send({
-    status: km.status,
     todayVN: fd(getTodayVN()),
-    updatedAt: km.updatedAt ? new Date(km.updatedAt).toISOString() : null,
-    projectsCount: km.rawData?.HopDong?.length || 0,
-    nccCount: km.rawData?.NCC?.length || 0,
-    preview: km.summaryText ? km.summaryText.slice(0, 800) : null,
+    defaultGroupChatId: defaultGroupChatId || null,
+    lastActiveChatId: lastActiveChatId || null,
+    keToanWebapp: {
+      status: km.status,
+      projectsCount: km.rawData?.HopDong?.length || 0,
+      nccCount: km.rawData?.NCC?.length || 0,
+    },
+    dieuHanhWebapp: {
+      status: tk.status,
+      tasksCount: tk.rawData?.tasks?.length || 0,
+      peopleCount: tk.rawData?.people?.length || 0,
+    },
   });
+});
+
+// Endpoint nhận thông báo tự động từ App Điều hành công việc (khi giao việc mới hoặc cập nhật tiến độ) để bắn thẳng vào nhóm Zalo
+app.post('/notify-task', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const targetChatId = body.chat_id || defaultGroupChatId || lastActiveChatId;
+
+    // Làm mới cache công việc ngay lập tức
+    taskCache.updatedAt = 0;
+
+    if (!targetChatId) {
+      return res.status(200).send({
+        ok: false,
+        message:
+          'Chưa có mã nhóm Zalo (chat_id). Hãy mời Bot vào nhóm và nhắn 1 tin tag @Bot Tra cứu hồ sơ để hệ thống tự lưu mã nhóm.',
+      });
+    }
+
+    let msg = body.text || '';
+    if (!msg && body.task) {
+      const t = body.task;
+      const actionTitle =
+        body.action === 'done'
+          ? '✅ [HOÀN THÀNH CÔNG VIỆC]'
+          : body.action === 'update'
+          ? '🔄 [CẬP NHẬT TIẾN ĐỘ CÔNG VIỆC]'
+          : '📌 [PHÂN CÔNG CÔNG VIỆC MỚI]';
+
+      const qtyLine =
+        N(t.qty) > 0 ? `\n• Khối lượng: ${N(t.done)}/${N(t.qty)} ${t.unit || ''} (${N(t.pct || 0)}%)` : '';
+
+      msg =
+        `${actionTitle}\n` +
+        `• Công trình: ${t.project || '—'}\n` +
+        `• Công việc: ${t.name || '—'}${t.type ? ' (' + t.type + ')' : ''}\n` +
+        `• Phụ trách: ${t.who || 'Chưa giao'}\n` +
+        `• Thời hạn: ${fd(t.start)} → ${fd(t.end)}${t.pri === 'Cao' ? ' (🔥 Ưu tiên Cao)' : ''}` +
+        qtyLine +
+        `\n• Trạng thái: ${t.st || 'Chưa bắt đầu'}${t.fc && t.fc !== 'Đúng tiến độ' ? ' - ⚠ ' + t.fc : ''}` +
+        (t.note ? `\n• Ghi chú: ${t.note}` : '') +
+        (body.by ? `\n• Người thao tác: ${body.by}` : '');
+    }
+
+    if (msg) {
+      const zRes = await sendZaloBotMessage(targetChatId, msg);
+      return res.status(200).send({ ok: true, chat_id: targetChatId, zalo: zRes });
+    }
+
+    return res.status(200).send({ ok: false, message: 'Missing task or text payload' });
+  } catch (err) {
+    console.error('Notify task error:', err.response?.data || err.message);
+    return res.status(200).send({ ok: false, error: err.message });
+  }
 });
 
 // Hỗ trợ xác thực bằng file HTML của Zalo
@@ -422,6 +621,13 @@ app.post('/webhook', async (req, res) => {
       let userText = (botEvent?.message?.text || '').trim();
       const botToken = ZALO_BOT_TOKEN || ZALO_ACCESS_TOKEN;
 
+      if (chatId) {
+        lastActiveChatId = chatId;
+        if (chatType === 'GROUP') {
+          defaultGroupChatId = chatId;
+        }
+      }
+
       // Xử lý khi chat trong Nhóm: tự động cắt bỏ phần "@Bot Tra cứu hồ sơ" ở đầu câu hỏi để AI hiểu đúng nội dung
       if (chatType === 'GROUP' || userText.startsWith('@')) {
         userText = userText
@@ -430,20 +636,19 @@ app.post('/webhook', async (req, res) => {
           .trim();
       }
 
+      // Lệnh nhanh lấy mã nhóm (nếu người dùng gõ "/id" hoặc "mã nhóm")
+      if (/^(\/id|ma nhom|mã nhóm)$/i.test(userText)) {
+        await sendZaloBotMessage(
+          chatId,
+          `📌 Mã kênh chat hiện tại (${chatType || 'PRIVATE'}): ${chatId}\nĐã lưu làm nơi nhận thông báo phân việc tự động!`
+        );
+        return res.status(200).send({ message: 'OK' });
+      }
+
       if (chatId && userText && botToken) {
         const replyText = await generateReply(userText);
-
-        const botRes = await axios.post(
-          `https://bot-api.zaloplatforms.com/bot${botToken}/sendMessage`,
-          {
-            chat_id: chatId,
-            text: replyText,
-          },
-          {
-            headers: { 'Content-Type': 'application/json' },
-          }
-        );
-        console.log('Zalo Bot response:', JSON.stringify(botRes.data));
+        const botRes = await sendZaloBotMessage(chatId, replyText);
+        console.log('Zalo Bot response:', JSON.stringify(botRes));
       }
       return res.status(200).send({ message: 'OK' });
     }
@@ -454,20 +659,12 @@ app.post('/webhook', async (req, res) => {
       const userText = body?.message?.text;
 
       if (senderId && userText) {
+        lastActiveChatId = senderId;
         const replyText = await generateReply(userText);
 
         if (ZALO_BOT_TOKEN) {
-          const botRes = await axios.post(
-            `https://bot-api.zaloplatforms.com/bot${ZALO_BOT_TOKEN}/sendMessage`,
-            {
-              chat_id: senderId,
-              text: replyText,
-            },
-            {
-              headers: { 'Content-Type': 'application/json' },
-            }
-          );
-          console.log('Zalo Bot response:', JSON.stringify(botRes.data));
+          const botRes = await sendZaloBotMessage(senderId, replyText);
+          console.log('Zalo Bot response:', JSON.stringify(botRes));
         } else {
           const zaloRes = await axios.post(
             'https://openapi.zalo.me/v3.0/oa/message/cs',
