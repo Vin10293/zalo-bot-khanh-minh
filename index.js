@@ -198,7 +198,7 @@ function buildKmContext(D) {
     const thieuLoc = locs.filter((l) => (GOT[l.id] || 0) < N(l.sl) && (!l.nguon || l.nguon === 'Mua mới có hóa đơn'));
 
     return [
-      `${idx + 1}. CÔNG TRÌNH: ${c.ten} (Mã: ${c.id})`,
+      `${idx + 1}. CÔNG TRÌNH: ${c.ten}`,
       `   - CĐT: ${c.cdt || '—'} (${c.lcdt || '—'}) | Số HĐ: ${c.so || '—'} | Phụ trách: ${c.pt || '—'} | Liên danh: ${c.ld || '—'}`,
       `   - Thời hạn: Ký ${fd(c.ky)} | Khởi công ${fd(c.kc)} | Kết thúc ${fd(endDay)} -> TÌNH TRẠNG HẠN: ${dlStatus}`,
       `   - Giá trị HĐ (gồm PL): ${fm(G)}đ (Gốc: ${fm(c.gt)}đ, Phụ lục: ${plInfo})`,
