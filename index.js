@@ -15,6 +15,38 @@ const ZALO_VERIFY_TOKEN = process.env.ZALO_VERIFY_TOKEN || 'VyEpT9xC0sjqlf1VgAqe
 // Khởi tạo Google GenAI client với AI_API_KEY
 const ai = new GoogleGenAI({ apiKey: AI_API_KEY });
 
+// Bộ nhớ tạm chống xử lý trùng lặp khi Zalo retry
+const processedMessages = new Set();
+
+// Hàm gọi Gemini siêu tốc (dùng gemini-3.5-flash-lite ~1.2s, kèm fallback và giới hạn < 1800 ký tự cho Zalo)
+async function generateReply(userText) {
+  const models = ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-3.8-flash'];
+
+  for (const model of models) {
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents: userText,
+        config: {
+          systemInstruction:
+            'Bạn là trợ lý ảo của Công ty TNHH TVXD Điện Khánh Minh (Bot Tra cứu hồ sơ). Luôn trả lời bằng tiếng Việt ngắn gọn, súc tích, lịch sự và tuyệt đối dưới 1500 ký tự.',
+          maxOutputTokens: 600,
+          thinkingConfig: { thinkingBudget: 0 },
+        },
+      });
+
+      const text = (response.text || '').trim();
+      if (text) {
+        return text.length > 1900 ? text.slice(0, 1900) + '...' : text;
+      }
+    } catch (err) {
+      console.warn(`Model ${model} failed:`, err.message);
+    }
+  }
+
+  return 'Xin lỗi, hệ thống AI đang bận trong giây lát. Anh/chị vui lòng nhắn lại giúp em nhé!';
+}
+
 // Trang chủ kiểm tra server sống & hỗ trợ thẻ meta xác thực domain Zalo
 app.get('/', (req, res) => {
   res.status(200).send(`<!DOCTYPE html>
@@ -42,27 +74,30 @@ app.get('/webhook', (req, res) => {
 app.post('/webhook', async (req, res) => {
   try {
     const body = req.body;
-
-    // TRƯỜNG HỢP 1: Sự kiện từ Zalo Bot Platform (Miễn phí 100% - bot-api.zaloplatforms.com)
-    // Cấu trúc payload: { ok: true, result: { event_name: 'message.text.received', message: { text, chat: { id } }, sender: { id } } }
     const botEvent = body?.result || body;
     const eventName = botEvent?.event_name;
+    const msgId = botEvent?.message?.message_id || botEvent?.message?.msg_id;
 
+    // Chống trùng lặp nếu Zalo gửi lại sự kiện cũ
+    if (msgId) {
+      if (processedMessages.has(msgId)) {
+        return res.status(200).send({ message: 'OK (duplicate skipped)' });
+      }
+      processedMessages.add(msgId);
+      if (processedMessages.size > 500) {
+        const first = processedMessages.values().next().value;
+        processedMessages.delete(first);
+      }
+    }
+
+    // TRƯỜNG HỢP 1: Sự kiện từ Zalo Bot Platform (Miễn phí 100% - bot-api.zaloplatforms.com)
     if (eventName === 'message.text.received' || (ZALO_BOT_TOKEN && botEvent?.message?.text && !eventName)) {
       const chatId = botEvent?.message?.chat?.id || botEvent?.sender?.id;
       const userText = botEvent?.message?.text;
       const botToken = ZALO_BOT_TOKEN || ZALO_ACCESS_TOKEN;
 
       if (chatId && userText && botToken) {
-        const response = await ai.models.generateContent({
-          model: 'gemini-3.8-flash',
-          contents: userText,
-          config: {
-            thinkingConfig: { thinkingBudget: 0 },
-          },
-        });
-
-        const replyText = response.text || 'Xin lỗi, tôi chưa thể xử lý tin nhắn này.';
+        const replyText = await generateReply(userText);
 
         const botRes = await axios.post(
           `https://bot-api.zaloplatforms.com/bot${botToken}/sendMessage`,
@@ -85,14 +120,8 @@ app.post('/webhook', async (req, res) => {
       const userText = body?.message?.text;
 
       if (senderId && userText) {
-        const response = await ai.models.generateContent({
-          model: 'gemini-3.8-flash',
-          contents: userText,
-        });
+        const replyText = await generateReply(userText);
 
-        const replyText = response.text || 'Xin lỗi, tôi chưa thể xử lý tin nhắn này.';
-
-        // Nếu có ZALO_BOT_TOKEN thì ưu tiên gửi qua Zalo Bot API miễn phí
         if (ZALO_BOT_TOKEN) {
           const botRes = await axios.post(
             `https://bot-api.zaloplatforms.com/bot${ZALO_BOT_TOKEN}/sendMessage`,
