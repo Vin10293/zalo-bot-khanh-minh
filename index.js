@@ -34,6 +34,30 @@ const fm = (n) => Math.round(N(n)).toLocaleString('vi-VN');
 const fd = (d) => (d ? String(d).slice(0, 10).split('-').reverse().join('/') : '—');
 const sm = (arr, fn) => (arr || []).reduce((s, x) => s + fn(x), 0);
 
+// Lấy ngày hiện tại chuẩn theo múi giờ Việt Nam (GMT+7) định dạng YYYY-MM-DD
+function getTodayVN() {
+  const now = new Date(Date.now() + 7 * 3600 * 1000);
+  return now.toISOString().slice(0, 10);
+}
+
+// Tính số ngày chênh lệch từ hôm nay (GMT+7) đến ngày d (YYYY-MM-DD): âm là đã quá hạn, dương là còn hạn
+function diffDays(d, todayStr) {
+  if (!d || !/^\d{4}-\d{2}-\d{2}$/.test(String(d).slice(0, 10))) return null;
+  const target = new Date(String(d).slice(0, 10) + 'T00:00:00Z');
+  const today = new Date(todayStr + 'T00:00:00Z');
+  return Math.round((target - today) / 86400000);
+}
+
+function formatDeadlineStatus(d, isDone, todayStr) {
+  if (isDone) return 'Đã hoàn thành (xong)';
+  const days = diffDays(d, todayStr);
+  if (days === null) return 'Chưa rõ ngày kết thúc';
+  if (days < 0) return `ĐÃ QUÁ HẠN ${Math.abs(days)} NGÀY (cần gia hạn/lưu ý gấp!)`;
+  if (days === 0) return `HẾT HẠN HÔM NAY (${fd(d)})`;
+  if (days <= 30) return `SẮP HẾT HẠN - chỉ còn ${days} ngày`;
+  return `Còn hạn ${days} ngày`;
+}
+
 function parseDong(dongStr) {
   try {
     return JSON.parse(dongStr || '[]');
@@ -46,6 +70,7 @@ function parseDong(dongStr) {
 function buildKmContext(D) {
   if (!D || !Array.isArray(D.HopDong)) return '';
 
+  const todayStr = getTodayVN();
   const HopDong = D.HopDong || [];
   const PhuLuc = D.PhuLuc || [];
   const Loc = D.Loc || [];
@@ -96,6 +121,8 @@ function buildKmContext(D) {
   let totalIvd = 0;
   let totalRec = 0;
   let totalNo = 0;
+  const expiredProjects = [];
+  const soonProjects = [];
 
   const ctLines = HopDong.map((c, idx) => {
     const G = gtT(c);
@@ -114,6 +141,19 @@ function buildKmContext(D) {
     const locs = by(Loc, c.id).filter((l) => N(l.cap) < 2);
     const costNoVat = sm(vts, (v) => N(v.sl) * N(v.dg));
     const costVat = sm(vts, (v) => N(v.sl) * N(v.dg) * (1 + N(v.vat) / 100));
+
+    const endDay = ktE(c);
+    const isDone = c.xong === true || c.xong === 'TRUE';
+    const dLeft = diffDays(endDay, todayStr);
+    const dlStatus = formatDeadlineStatus(endDay, isDone, todayStr);
+
+    if (!isDone && dLeft !== null) {
+      if (dLeft < 0) {
+        expiredProjects.push(`${c.ten} (Hạn: ${fd(endDay)} -> ĐÃ QUÁ HẠN ${Math.abs(dLeft)} ngày)`);
+      } else if (dLeft <= 30) {
+        soonProjects.push(`${c.ten} (Hạn: ${fd(endDay)} -> Còn ${dLeft} ngày)`);
+      }
+    }
 
     totalG += G;
     totalTu += U;
@@ -143,18 +183,29 @@ function buildKmContext(D) {
           .join(' | ')
       : 'Chưa xuất HĐ';
 
-    // Kiểm tra vật tư thiếu / chưa về
+    // Kiểm tra bảo lãnh quá hạn / sắp hết hạn
+    const checkBl = (ok, h) => {
+      if (!ok) return 'Chưa làm';
+      const dl = diffDays(h, todayStr);
+      if (dl !== null) {
+        if (dl < 0) return `Đã làm (Hạn ${fd(h)} - ĐÃ QUÁ HẠN ${Math.abs(dl)} ngày!)`;
+        if (dl <= 30) return `Đã làm (Hạn ${fd(h)} - Sắp hết hạn còn ${dl} ngày)`;
+        return `Đã làm (Hạn ${fd(h)} - Còn ${dl} ngày)`;
+      }
+      return `Đã làm (${h || '—'})`;
+    };
+
     const thieuLoc = locs.filter((l) => (GOT[l.id] || 0) < N(l.sl) && (!l.nguon || l.nguon === 'Mua mới có hóa đơn'));
 
     return [
       `${idx + 1}. CÔNG TRÌNH: ${c.ten} (Mã: ${c.id})`,
       `   - CĐT: ${c.cdt || '—'} (${c.lcdt || '—'}) | Số HĐ: ${c.so || '—'} | Phụ trách: ${c.pt || '—'} | Liên danh: ${c.ld || '—'}`,
-      `   - Thời hạn: Ký ${fd(c.ky)} | Khởi công ${fd(c.kc)} | Kết thúc ${fd(ktE(c))} (${c.xong ? 'Đã xong' : 'Đang thực hiện'})`,
+      `   - Thời hạn: Ký ${fd(c.ky)} | Khởi công ${fd(c.kc)} | Kết thúc ${fd(endDay)} -> TÌNH TRẠNG HẠN: ${dlStatus}`,
       `   - Giá trị HĐ (gồm PL): ${fm(G)}đ (Gốc: ${fm(c.gt)}đ, Phụ lục: ${plInfo})`,
       `   - Tạm ứng: ${fm(U)}đ (Đã hoàn ứng: ${fm(tru)}đ, Còn ứng: ${fm(Math.max(0, U - tru))}đ)`,
       `   - Tiến độ xuất HĐ: ${fm(I)}đ (${pc}%) | Còn lại chưa xuất: ${fm(clv)}đ`,
       `   - Thanh toán & Công nợ CĐT: CĐT đã trả ${fm(rec)}đ | CĐT CÒN NỢ: ${fm(no)}đ | Giữ lại BH+QT: ${fm(bh + qt)}đ (${c.glt ? 'Đã trả giữ lại' : 'Chưa trả giữ lại'})`,
-      `   - Bảo lãnh: BLTH=${c.blth ? 'Đã làm (' + fd(c.blthh) + ')' : 'Chưa'}, BLTU=${c.bltu ? 'Đã làm (' + fd(c.bltuh) + ')' : 'Chưa'}, BLBH=${c.blbh ? 'Đã làm (' + fd(c.blbhh) + ')' : 'Chưa'} | BB bàn giao: ${c.bbsd ? 'Đã lập (' + fd(c.bbsdn) + ')' : 'Chưa'}`,
+      `   - Bảo lãnh: BLTH=${checkBl(c.blth, c.blthh)} | BLTU=${checkBl(c.bltu, c.bltuh)} | BLBH=${checkBl(c.blbh, c.blbhh)} | BB bàn giao: ${c.bbsd ? 'Đã lập (' + fd(c.bbsdn) + ')' : 'Chưa'}`,
       `   - Chi tiết hoá đơn đầu ra (${rr.length} đợt): ${ttInfo}`,
       `   - Chi phí vật tư/đầu vào: ${vts.length} dòng HĐ, Tổng chưa VAT: ${fm(costNoVat)}đ (Có VAT: ${fm(costVat)}đ) | Bảng lọc dự toán: ${locs.length} mục (${thieuLoc.length} mục chưa về đủ)`,
       c.gc ? `   - Ghi chú: ${c.gc}` : '',
@@ -198,6 +249,13 @@ function buildKmContext(D) {
 
   return [
     `=== DỮ LIỆU TRỰC TIẾP TỪ WEBAPP THEO DÕI CÔNG TRÌNH ĐIỆN KHÁNH MINH ===`,
+    `NGÀY HÔM NAY (THEO GIỜ VIỆT NAM GMT+7): ${fd(todayStr)} (YYYY-MM-DD: ${todayStr})`,
+    `⚠️ QUY TẮC BẮT BUỘC VỀ NGÀY THÁNG: Hôm nay là ngày ${fd(todayStr)}. Tuyệt đối KHÔNG tự bịa ngày khác, KHÔNG tự nhẩm sai số ngày còn lại/quá hạn mà PHẢI DÙNG ĐÚNG con số "ĐÃ QUÁ HẠN X NGÀY" hoặc "Còn hạn X ngày" đã được máy tính sẵn ở từng công trình bên dưới!`,
+    ``,
+    `CẢNH BÁO TIẾN ĐỘ / HẠN HỢP ĐỒNG TÍNH ĐẾN HÔM NAY (${fd(todayStr)}):`,
+    `- Công trình ĐÃ QUÁ HẠN (${expiredProjects.length}): ${expiredProjects.length ? expiredProjects.join(' | ') : 'Không có'}`,
+    `- Công trình SẮP HẾT HẠN trong 30 ngày tới (${soonProjects.length}): ${soonProjects.length ? soonProjects.join(' | ') : 'Không có'}`,
+    ``,
     `TỔNG QUAN TOÀN CÔNG TY:`,
     `- Tổng số công trình: ${HopDong.length} công trình`,
     `- Tổng giá trị hợp đồng (gồm phụ lục): ${fm(totalG)} đ`,
@@ -217,7 +275,9 @@ function buildKmContext(D) {
 // Hàm tải dữ liệu từ Google Apps Script Webapp (có cache 45 giây để bot phản hồi tức thì)
 async function getKmData(force = false) {
   const now = Date.now();
-  if (!force && kmCache.summaryText && now - kmCache.updatedAt < 45000) {
+  if (!force && kmCache.rawData && now - kmCache.updatedAt < 45000) {
+    // Luôn dựng lại summaryText theo ngày hôm nay mới nhất
+    kmCache.summaryText = buildKmContext(kmCache.rawData);
     return kmCache;
   }
 
@@ -241,7 +301,6 @@ async function getKmData(force = false) {
       return kmCache;
     }
 
-    // Nếu trả về trang đăng nhập Google Accounts hoặc HTML (chưa bật quyền Bất kỳ ai hoặc chưa cập nhật doGet)
     const str = typeof data === 'string' ? data : JSON.stringify(data);
     if (str.includes('accounts.google.com') || str.includes('ServiceLogin')) {
       kmCache.status = 'auth_required';
@@ -260,12 +319,13 @@ async function getKmData(force = false) {
 async function generateReply(userText) {
   const forceRefresh = /cập nhật|tải lại|mới nhất|refresh|sync/i.test(userText);
   const km = await getKmData(forceRefresh);
+  const todayVN = fd(getTodayVN());
 
   let dataContext = '';
   if (km.summaryText) {
-    dataContext = `\n\nDưới đây là toàn bộ dữ liệu thực tế mới nhất từ Webapp Theo dõi công trình của Công ty TNHH TVXD Điện Khánh Minh. Hãy tra cứu chính xác các con số (giá trị HĐ, phụ lục, tạm ứng, đã xuất HĐ, CĐT còn nợ, bảo lãnh, vật tư, công nợ NCC) để trả lời người dùng:\n${km.summaryText}`;
+    dataContext = `\n\nDưới đây là toàn bộ dữ liệu thực tế mới nhất từ Webapp Theo dõi công trình của Công ty TNHH TVXD Điện Khánh Minh:\n${km.summaryText}`;
   } else if (km.status === 'auth_required' || km.status === 'html_only') {
-    dataContext = `\n\n[LƯU Ý KỸ THUẬT: Hiện tại link Apps Script Webapp (${KM_WEBAPP_URL}) đang yêu cầu đăng nhập Google hoặc chưa cập nhật hàm doGet(e) trả JSON. Nếu người dùng hỏi số liệu công trình, hãy nhắc nhẹ anh/chị vào Apps Script -> Triển khai -> Quản lý nội dung triển khai -> Sửa -> chọn Quyền truy cập: "Bất kỳ ai" (Anyone) và cập nhật hàm doGet(e) đã sửa trong file Code.gs để bot đọc được dữ liệu tự động.]`;
+    dataContext = `\n\n[LƯU Ý KỸ THUẬT: Hiện tại link Apps Script Webapp (${KM_WEBAPP_URL}) đang yêu cầu đăng nhập Google hoặc chưa cập nhật hàm doGet(e) trả JSON.]`;
   }
 
   const models = ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-3.8-flash'];
@@ -277,8 +337,10 @@ async function generateReply(userText) {
         contents: userText,
         config: {
           systemInstruction:
-            'Bạn là trợ lý ảo kế toán & theo dõi công trình của Công ty TNHH TVXD Điện Khánh Minh (Bot Tra cứu hồ sơ). ' +
-            'Luôn trả lời bằng tiếng Việt ngắn gọn, rõ ràng, định dạng số tiền dễ đọc (VD: 1.250.000.000 đ) và tuyệt đối dưới 1500 ký tự.' +
+            `Bạn là trợ lý ảo kế toán & theo dõi công trình của Công ty TNHH TVXD Điện Khánh Minh (Bot Tra cứu hồ sơ). ` +
+            `HÔM NAY LÀ NGÀY ${todayVN} (theo giờ Việt Nam GMT+7). ` +
+            `Luôn dùng đúng số ngày quá hạn / còn hạn đã được hệ thống tính sẵn trong dữ liệu, KHÔNG tự suy đoán ngày hiện tại. ` +
+            `Trả lời bằng tiếng Việt ngắn gọn, rõ ràng, định dạng số tiền dễ đọc (VD: 1.250.000.000 đ) và tuyệt đối dưới 1500 ký tự.` +
             dataContext,
           maxOutputTokens: 650,
           thinkingConfig: { thinkingBudget: 0 },
@@ -315,10 +377,11 @@ app.get('/km-status', async (req, res) => {
   const km = await getKmData(true);
   res.status(200).send({
     status: km.status,
+    todayVN: fd(getTodayVN()),
     updatedAt: km.updatedAt ? new Date(km.updatedAt).toISOString() : null,
     projectsCount: km.rawData?.HopDong?.length || 0,
     nccCount: km.rawData?.NCC?.length || 0,
-    preview: km.summaryText ? km.summaryText.slice(0, 500) : null,
+    preview: km.summaryText ? km.summaryText.slice(0, 800) : null,
   });
 });
 
