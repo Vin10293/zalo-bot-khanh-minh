@@ -9,7 +9,7 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const ZALO_ACCESS_TOKEN = process.env.ZALO_ACCESS_TOKEN;
 const AI_API_KEY = process.env.AI_API_KEY;
-const ZALO_VERIFY_TOKEN = process.env.ZALO_VERIFY_TOKEN || '';
+const ZALO_VERIFY_TOKEN = process.env.ZALO_VERIFY_TOKEN || 'VyEpT9xC0sjqlf1VgAqeO76_Y5gToLC1Dp0m';
 
 // Khởi tạo Google GenAI client với AI_API_KEY
 const ai = new GoogleGenAI({ apiKey: AI_API_KEY });
@@ -25,6 +25,11 @@ app.get('/', (req, res) => {
 </head>
 <body>Zalo OA Webhook is running!</body>
 </html>`);
+});
+
+// Hỗ trợ xác thực bằng file HTML của Zalo
+app.get(`/zalo_verifier${ZALO_VERIFY_TOKEN}.html`, (req, res) => {
+  res.status(200).send(`There is no limit to what you can accomplish using Zalo! zalo-platform-site-verification=${ZALO_VERIFY_TOKEN}`);
 });
 
 // Hỗ trợ GET /webhook để kiểm tra nhanh trên trình duyệt
